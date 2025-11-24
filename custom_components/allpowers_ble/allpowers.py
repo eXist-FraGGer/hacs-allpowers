@@ -128,6 +128,26 @@ class AllpowersBLE:
         """Return outgoing power in watts."""
         return self._state.watts_export
 
+    @property
+    def frequency_hz(self) -> int:
+        """Return AC output frequency (50 or 60 Hz)."""
+        return self._state.frequency_hz
+
+    @property
+    def work_mode(self) -> str:
+        """Return work mode."""
+        return self._state.work_mode
+
+    @property
+    def eco_mode(self) -> bool:
+        """Return eco mode."""
+        return self._state.eco_mode
+
+    @property
+    def eco_shutdown_time(self) -> int:
+        """Return eco shutdown time (hours)."""
+        return self._state.eco_shutdown_time
+
     async def _change_status_to_device(self) -> None:
         """Send the current state back to the device."""
         full = bytes.fromhex("a56500b10101000071")
@@ -141,11 +161,65 @@ class AllpowersBLE:
         s[7] = s[7] ^ (1 << 0) if self.dc_on else s[7] & ~(1 << 0)
         s[7] = s[7] ^ (1 << 1) if self.ac_on else s[7] & ~(1 << 1)
 
+        # Encode frequency from state (bit3)
+        if self._state.frequency_hz == 60:
+            s[7] |= (1 << 3)
+        else:
+            s[7] &= ~(1 << 3)
+
         # I'm sure this checksum algo isn't complete/correct,
         # but it certainly works for all the scenarios we care about
         s[8] = 113 - s[7]
         if self.ac_on:
             s[8] = s[8] + 4
+
+        # Captured from mobile app for 60Hz writes
+        if self._state.frequency_hz == 60:
+            s[8] = s[8] + 0x10
+
+        if self._client is not None:
+            await self._client.write_gatt_char(CHARACTERISTIC_WRITE, s)
+
+    async def _change_settings_to_device(self) -> None:
+        """Send settings (work mode / eco / eco timer) without touching power state."""
+        # base: a56500b1010202000171
+        s = bytearray.fromhex("a56500b1010202000171")
+
+        wm_map = {
+            "Mute Mode": 0x00,
+            "Standard Mode": 0x02,
+            "Fast Mode": 0x04,
+        }
+        wm_val = wm_map.get(self._state.work_mode, 0x02)
+        eco_flag = 0x01 if self._state.eco_mode else 0x00
+        X = wm_val | eco_flag
+
+        # eco timer hour code
+        Y = self._state.eco_shutdown_time
+        if Y not in (1, 2, 4, 6):
+            Y = 1
+
+        s[7] = X
+        s[8] = Y
+
+        # Confirmed by full-combo capture: settings checksum is XOR of all bytes
+        # before the checksum byte.
+        chk = 0
+        for b in s[:9]:
+            chk ^= b
+        s[9] = chk
+
+        _LOGGER.debug(
+            "%s: WRITE SETTINGS → %s | wm=%s eco=%s et=%sh (X=0x%02X Y=0x%02X CHK=0x%02X)",
+            self.name,
+            bytes(s).hex(),
+            self._state.work_mode,
+            self._state.eco_mode,
+            self._state.eco_shutdown_time,
+            X,
+            Y,
+            chk,
+        )
 
         if self._client is not None:
             await self._client.write_gatt_char(CHARACTERISTIC_WRITE, s)
@@ -164,6 +238,36 @@ class AllpowersBLE:
         """Set the current value of the DC."""
         self._state.dc_on = enabled
         await self._change_status_to_device()
+
+    async def set_frequency(self, hz: int) -> None:
+        """Set output frequency to 50 or 60 Hz."""
+        if hz not in (50, 60):
+            return
+
+        self._state.frequency_hz = hz
+        await self._change_status_to_device()
+
+    async def set_work_mode(self, mode: str) -> None:
+        """Set work mode."""
+        if mode not in ("Mute Mode", "Standard Mode", "Fast Mode"):
+            return
+        self._state.work_mode = mode
+        await self._change_settings_to_device()
+
+    async def set_eco_mode(self, enabled: bool) -> None:
+     self._state.eco_mode = enabled
+     await self._change_settings_to_device()
+
+    # compatibility for switch naming
+    async def set_eco(self, enabled: bool) -> None:
+        await self.set_eco_mode(enabled)
+
+    async def set_eco_shutdown_time(self, hours: int) -> None:
+        """Set eco shutdown time (hours: 1/2/4/6)."""
+        if hours not in (1, 2, 4, 6):
+            return
+        self._state.eco_shutdown_time = hours
+        await self._change_settings_to_device()
 
     async def stop(self) -> None:
         """Stop the Allpowers BLE."""
@@ -260,25 +364,61 @@ class AllpowersBLE:
 
         self._buf += data
 
-        if len(data) <= 14: return
+        if len(data) <= 14:
+            # Short/Settings notifications (R1500 V2.0 actual format)
+            if len(data) >= 10 and data[0] == 0xA5 and data[1] == 0x65:
+                _LOGGER.debug("%s: NOTIFY SETTINGS ← %s", self.name, data.hex())
 
+                X = None
+                Y = None
+
+                # Your device sends: a5 65 b1 00 01 06 03 [X] [Y] ...
+                if data[:7] == bytes.fromhex("a565b100010603"):
+                    X = data[7]
+                    Y = data[8]
+
+                if X is not None and Y is not None:
+                    eco = (X & 0x01) == 0x01
+                    wm_val = X & 0xFE
+
+                    _LOGGER.debug(
+                        "%s: NOTIFY SETTINGS DECODED ← wm_val=0x%02X eco=%s et=%sh (X=0x%02X Y=0x%02X)",
+                        self.name, wm_val, eco, Y, X, Y
+                    )
+
+                    if wm_val == 0x00:
+                        self._state.work_mode = "Mute Mode"
+                    elif wm_val == 0x02:
+                        self._state.work_mode = "Standard Mode"
+                    elif wm_val == 0x04:
+                        self._state.work_mode = "Fast Mode"
+
+                    self._state.eco_mode = eco
+                    if Y in (1, 2, 4, 6):
+                        self._state.eco_shutdown_time = Y
+
+                    self._fire_callbacks()
+            return
+        
         battery_percentage = data[8]
         dc_on = data[7] >> 0 & 1 == 1
         ac_on = data[7] >> 1 & 1 == 1
         torch_on = data[7] >> 4 & 1 == 1
+        freq_hz = 60 if (data[7] & 0x04) else 50
         output_power = (256 * data[11]) + data[12]
         input_power = (256 * data[9]) + data[10]
         minutes_remaining = (256 * data[13]) + data[14]
 
-        self._state = AllpowersState(
-            ac_on=ac_on,
-            dc_on=dc_on,
-            light_on=torch_on,
-            percent_remain=battery_percentage,
-            minutes_remain=minutes_remaining,
-            watts_export=output_power,
-            watts_import=input_power,
-        )
+        st = self._state
+
+        st.ac_on = ac_on
+        st.dc_on = dc_on
+        st.light_on = torch_on
+        st.frequency_hz = freq_hz
+        st.percent_remain = battery_percentage
+        st.minutes_remain = minutes_remaining
+        st.watts_export = output_power
+        st.watts_import = input_power
 
         self._fire_callbacks()
 

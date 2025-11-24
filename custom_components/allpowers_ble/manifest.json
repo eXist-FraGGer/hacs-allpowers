@@ -7,10 +7,10 @@
       "local_name": "AP S*"
     }
   ],
-  "codeowners": ["@jinglemansweep"],
+  "codeowners": ["@jinglemansweep", "@derselben"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters"],
-  "documentation": "https://github.com/jinglemansweep/hacs-allpowers",
+  "documentation": "https://github.com/derselben/hacs-allpowers",
   "integration_type": "device",
   "iot_class": "local_push",
   "requirements": []

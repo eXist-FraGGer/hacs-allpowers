@@ -24,6 +24,10 @@ class AllpowersState:
     ac_on: bool = False
     dc_on: bool = False
     light_on: bool = False
+    frequency_hz: int = 50
+    work_mode: str = "Standard Mode"
+    eco_mode: bool = False
+    eco_shutdown_time: int = 1  # hours (1/2/4/6)
     percent_remain: int = 0
     minutes_remain: int = 0
     watts_import: int = 0

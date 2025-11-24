@@ -45,10 +45,20 @@ TORCH_SWITCH_DESCRIPTION = SwitchEntityDescription(
     name="Light",
 )
 
+ECO_SWITCH_DESCRIPTION = SwitchEntityDescription(
+    key="eco",
+    device_class=SwitchDeviceClass.SWITCH,
+    entity_registry_enabled_default=True,
+    entity_registry_visible_default=True,
+    has_entity_name=True,
+    name="Eco Mode",
+)
+
 SWITCH_DESCRIPTIONS = [
     AC_SWITCH_DESCRIPTION,
     DC_SWITCH_DESCRIPTION,
     TORCH_SWITCH_DESCRIPTION,
+    ECO_SWITCH_DESCRIPTION,
 ]
 
 
@@ -108,7 +118,7 @@ class AllpowersBLESwitch(
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn entity off"""
-        if self._key not in ["ac", "dc", "torch"]:
+        if self._key not in ["ac", "dc", "torch", "eco"]:
             return
         self._last_run_success = bool(
             await getattr(self._device, f"set_{self._key}")(False)
@@ -119,8 +129,8 @@ class AllpowersBLESwitch(
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Turn entity off"""
-        if self._key not in ["ac", "dc", "torch"]:
+        """Turn entity on"""
+        if self._key not in ["ac", "dc", "torch", "eco"]:
             return
         self._last_run_success = bool(
             await getattr(self._device, f"set_{self._key}")(True)
@@ -149,6 +159,8 @@ class AllpowersBLESwitch(
             return self._device.dc_on
         elif self._key == "torch":
             return self._device.light_on
+        elif self._key == "eco":
+            return self._device.eco_mode
         else:
             return False
 
